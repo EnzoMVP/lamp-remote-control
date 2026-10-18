@@ -1,0 +1,9 @@
+singleton Theme 1.0 Theme.qml
+Bulb3D 1.0 Bulb3D.qml
+Icon 1.0 Icon.qml
+CircleButton 1.0 CircleButton.qml
+BigSlider 1.0 BigSlider.qml
+ToggleSwitch 1.0 ToggleSwitch.qml
+PresetTile 1.0 PresetTile.qml
+PanelBackground 1.0 PanelBackground.qml
+Flyout 1.0 Flyout.qml
