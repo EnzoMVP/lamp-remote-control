@@ -5,7 +5,7 @@ import pytest
 from PySide6.QtCore import QObject, Signal
 
 from app.settings import Settings, load_settings, save_settings
-from app.voice import BLOCK, SpeechGate, VoiceController, match_command
+from app.voice import BLOCK, SpeechGate, VoiceController, is_complete, match_command
 
 
 def w(word, conf=1.0, dur=0.6):
@@ -47,6 +47,14 @@ def test_two_commands_in_one_breath_are_ignored():
     assert match_command([w("lâmpada"), w("acende"), w("lâmpada"), w("apaga")]) is None
 
 
+def test_is_complete_only_for_a_whole_command():
+    assert is_complete("lâmpada apaga")
+    assert is_complete("[unk] lâmpada foco")
+    assert not is_complete("lâmpada")
+    assert not is_complete("lâmpada apaga [unk]")
+    assert not is_complete("")
+
+
 # --- SpeechGate ----------------------------------------------------------------------
 
 def block(level: int) -> bytes:
@@ -80,6 +88,15 @@ def test_short_pause_inside_a_command_does_not_split_it():
     gate.push(LOUD)  # "lâmpada"
     assert not any(gate.push(QUIET)[1] for _ in range(3))  # the comma
     assert gate.push(LOUD) == (LOUD, False)  # "apaga"
+
+
+def test_complete_command_ends_after_a_short_pause():
+    gate = SpeechGate(hangover=7, quick_hangover=3)
+    gate.push(LOUD)
+    assert gate.speaking
+    ends = [gate.push(QUIET, complete=True)[1] for _ in range(3)]
+    assert ends == [False, False, True]
+    assert not gate.speaking
 
 
 def test_noise_floor_rises_with_background_noise():
@@ -120,7 +137,7 @@ def test_settings_round_trip_ignores_unknown_keys(tmp_path):
 # --- VoiceController -----------------------------------------------------------------
 
 class FakeListener(QObject):
-    heard = Signal(str, str)
+    heard = Signal(str, str, int)
     statusChanged = Signal(str, str)
     finished = Signal()
 
@@ -175,14 +192,14 @@ def test_enabling_starts_listening_and_is_remembered(voice):
 def test_commands_drive_the_bulb(voice, command, call):
     ctrl, bulb, listeners, _ = voice
     ctrl.setEnabled(True)
-    listeners[0].heard.emit("…", command)
+    listeners[0].heard.emit("…", command, 300)
     assert bulb.calls == [call]
 
 
 def test_non_commands_do_nothing(voice):
     ctrl, bulb, listeners, _ = voice
     ctrl.setEnabled(True)
-    listeners[0].heard.emit("lâmpada(1.00) [unk](0.99)", "")
+    listeners[0].heard.emit("lâmpada(1.00) [unk](0.99)", "", 300)
     assert bulb.calls == []
 
 
@@ -192,8 +209,8 @@ def test_test_mode_only_logs(voice, caplog):
     ctrl.setTestMode(True)
     assert saved[-1].voice_test is True
     with caplog.at_level("INFO", logger="app.voice"):
-        listeners[0].heard.emit("lâmpada(1.00) apaga(1.00)", "off")
-        listeners[0].heard.emit("lâmpada(1.00) [unk](0.99)", "")
+        listeners[0].heard.emit("lâmpada(1.00) apaga(1.00)", "off", 300)
+        listeners[0].heard.emit("lâmpada(1.00) [unk](0.99)", "", 300)
     assert bulb.calls == []
     assert 'executaria "off"' in caplog.text
     assert "ignorado" in caplog.text
@@ -203,7 +220,7 @@ def test_offline_bulb_is_left_alone(voice):
     ctrl, bulb, listeners, _ = voice
     bulb.ready = False
     ctrl.setEnabled(True)
-    listeners[0].heard.emit("…", "on")
+    listeners[0].heard.emit("…", "on", 300)
     assert bulb.calls == []
 
 
@@ -215,7 +232,7 @@ def test_disabling_stops_the_listener_and_ignores_late_signals(voice):
     assert old.stopped
     assert ctrl.status == "off"
     old.statusChanged.emit("listening", "")
-    old.heard.emit("…", "on")
+    old.heard.emit("…", "on", 300)
     assert ctrl.status == "off"
     assert bulb.calls == []
 

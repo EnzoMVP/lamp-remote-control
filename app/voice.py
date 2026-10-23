@@ -6,6 +6,9 @@ Pipeline, in the VoiceListener thread:
 
 - The gate splits the audio into utterances (sound bounded by silence). Vosk only runs
   while there is sound, so a quiet room costs next to nothing.
+- Latency: an utterance normally ends after 0.7 s of silence, so the pause in "lâmpada,
+  apaga" doesn't split it. Once the words so far already form a whole command, 0.2 s is
+  enough, which is most of what the user waits for.
 - Vosk is restricted to the command phrases plus "[unk]" (anything else), which makes the
   four phrases very reliable.
 - An utterance runs only if it is *exactly* one command: "lâmpada, apaga" said on its own
@@ -78,6 +81,17 @@ def match_command(words: list[dict]) -> str | None:
     return COMMANDS.get(" ".join(w["word"] for w in kept))
 
 
+def is_complete(partial: str) -> bool:
+    """Whether Vosk's partial transcript already reads as a whole command.
+
+    Only shortens the wait for silence; the final words still go through match_command.
+    """
+    words = partial.split()
+    while words and words[0] == "[unk]":  # a click before the command, as in match_command
+        words.pop(0)
+    return " ".join(words) in COMMANDS
+
+
 def describe(words: list[dict]) -> str:
     return " ".join(f"{w['word']}({w['conf']:.2f})" for w in words)
 
@@ -92,15 +106,16 @@ class SpeechGate:
 
     An utterance starts at the first block clearly louder than the background noise (with
     `preroll` blocks before it, so the first syllable isn't cut) and ends after `hangover`
-    quiet blocks. The noise floor adapts while idle; a sound that never stops (a fan was
+    quiet blocks, or `quick_hangover` when the caller says the utterance looks complete. The noise floor adapts while idle; a sound that never stops (a fan was
     switched on) ends the utterance after `max_blocks` and becomes the new floor.
     """
 
     def __init__(self, min_rms: float = 150.0, ratio: float = 3.0, preroll: int = 3,
-                 hangover: int = 7, max_blocks: int = 100):
+                 hangover: int = 7, quick_hangover: int = 2, max_blocks: int = 100):
         self._min_rms = min_rms
         self._ratio = ratio
         self._hangover = hangover
+        self._quick_hangover = quick_hangover
         self._max_blocks = max_blocks
         self._preroll: deque[bytes] = deque(maxlen=preroll)
         self._floor = min_rms / ratio
@@ -114,11 +129,19 @@ class SpeechGate:
         return self._active
 
     @property
+    def speaking(self) -> bool:
+        """Inside an utterance and the last block was loud."""
+        return self._active and self._quiet == 0
+
+    @property
     def threshold(self) -> float:
         return max(self._min_rms, self._floor * self._ratio)
 
-    def push(self, block: bytes) -> tuple[bytes, bool]:
-        """Returns (audio to feed the recognizer, whether an utterance just ended)."""
+    def push(self, block: bytes, complete: bool = False) -> tuple[bytes, bool]:
+        """Returns (audio to feed the recognizer, whether an utterance just ended).
+
+        `complete`: what was heard so far is a whole command, so a short pause ends it.
+        """
         level = rms(block)
         loud = level >= self.threshold
         if not self._active:
@@ -134,7 +157,7 @@ class SpeechGate:
         self._length += 1
         self._quietest = min(self._quietest, level)
         self._quiet = 0 if loud else self._quiet + 1
-        if self._quiet >= self._hangover:
+        if self._quiet >= (self._quick_hangover if complete else self._hangover):
             self._active = False
             return block, True
         if self._length >= self._max_blocks:
@@ -166,8 +189,9 @@ def download_model(dest: Path, stop: threading.Event) -> bool:
 
 
 class VoiceListener(QThread):
-    # words heard with their confidence, command id ("" if the utterance isn't a command)
-    heard = Signal(str, str)
+    # words heard with their confidence, command id ("" if the utterance isn't a command),
+    # ms from the end of speech to the decision
+    heard = Signal(str, str, int)
     # "downloading" | "loading" | "listening" | "error", user-facing message (pt-BR)
     statusChanged = Signal(str, str)
 
@@ -234,10 +258,11 @@ class VoiceListener(QThread):
         gate = SpeechGate()
         words: list[dict] = []
         with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=BLOCK, channels=1,
-                               dtype="int16", callback=on_audio):
+                               dtype="int16", latency="low", callback=on_audio):
             self.statusChanged.emit("listening", "")
             log.info("Listening on %s", sd.query_devices(kind="input")["name"])
-            last_block = time.monotonic()
+            last_block = speech_end = time.monotonic()
+            complete = False
             while not self._stop.is_set():
                 try:
                     block = blocks.get(timeout=0.2)
@@ -246,16 +271,24 @@ class VoiceListener(QThread):
                         raise RuntimeError("no audio from the microphone") from None
                     continue
                 last_block = time.monotonic()
-                audio, ended = gate.push(block)
+                audio, ended = gate.push(block, complete)
+                if gate.speaking:
+                    speech_end = last_block
                 if audio and rec.AcceptWaveform(audio):
                     words += json.loads(rec.Result()).get("result", [])
+                if gate.active and not gate.speaking:
+                    # In a pause: does what we have so far already read as a command?
+                    partial = json.loads(rec.PartialResult()).get("partial", "")
+                    complete = is_complete(" ".join([*(w["word"] for w in words), partial]))
+                else:
+                    complete = False
                 if ended:
                     words += json.loads(rec.FinalResult()).get("result", [])
                     rec.Reset()
-                    self._finish(words)
-                    words = []
+                    self._finish(words, speech_end)
+                    words, complete = [], False
 
-    def _finish(self, words: list[dict]) -> None:
+    def _finish(self, words: list[dict], speech_end: float) -> None:
         if not words:
             return
         command = match_command(words) or ""
@@ -265,7 +298,7 @@ class VoiceListener(QThread):
                 command = ""
             else:
                 self._last_command = now
-        self.heard.emit(describe(words), command)
+        self.heard.emit(describe(words), command, round((time.monotonic() - speech_end) * 1000))
 
 
 class VoiceController(QObject):
@@ -361,14 +394,15 @@ class VoiceController(QObject):
             self._status, self._message = status, message
             self.statusChanged.emit()
 
-    @Slot(str, str)
-    def _on_heard(self, text: str, command: str) -> None:
+    @Slot(str, str, int)
+    def _on_heard(self, text: str, command: str, delay_ms: int) -> None:
         if self.sender() != self._listener:
             return
         if self._settings.voice_test:
             # The test log is for the user to read, hence pt-BR.
             if command:
-                log.info('Voz (teste): ouviu "%s" -> executaria "%s"', text, command)
+                log.info('Voz (teste): ouviu "%s" -> executaria "%s" (%d ms após a fala)',
+                         text, command, delay_ms)
             elif any(not w.startswith("[unk]") for w in text.split()):
                 log.info('Voz (teste): ouviu "%s" -> ignorado', text)
             else:
@@ -380,7 +414,7 @@ class VoiceController(QObject):
         if not self._bulb.ready:
             log.info("Voice: %s heard, but the bulb isn't reachable", command)
             return
-        log.info("Voice: %s (%s)", command, text)
+        log.info("Voice: %s (%s), %d ms after speech", command, text, delay_ms)
         ACTIONS[command](self._bulb)
 
     def _persist(self) -> None:

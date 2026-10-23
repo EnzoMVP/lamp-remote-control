@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
@@ -20,6 +21,7 @@ BACKOFF_SECONDS = (1, 2, 5, 10, 20, 30)
 POLL_FAST_MS = 3000   # panel open
 POLL_SLOW_MS = 15000  # panel closed: keeps the tray icon honest and the socket alive
 REDISCOVER_AFTER = 3  # failures before trying a broadcast scan for a new IP
+SLOW_COMMAND_MS = 250  # log commands slower than this, to see where the delay goes
 
 
 class BulbWorker(QObject):
@@ -37,6 +39,7 @@ class BulbWorker(QObject):
         self._backend = backend
         self._lock = threading.Lock()
         self._pending: dict = {}
+        self._pending_since = 0.0
         self._kicked = False
         self._online = False
         self._failures = 0
@@ -49,6 +52,8 @@ class BulbWorker(QObject):
     def submit(self, dps: dict) -> None:
         """Thread-safe: queue DPS to send. At most one flush is ever queued."""
         with self._lock:
+            if not self._pending:
+                self._pending_since = time.monotonic()
             self._pending.update(dps)
             if self._kicked:
                 return
@@ -96,13 +101,20 @@ class BulbWorker(QObject):
     def _flush(self) -> None:
         with self._lock:
             dps, self._pending, self._kicked = self._pending, {}, False
+            since = self._pending_since
         if not dps or not self._online:
             return
+        start = time.monotonic()
         try:
             echo = self._call(self._backend.set_dps, dps)
         except BulbError as e:
             self._fail(e)
             return
+        done = time.monotonic()
+        # Queued = waiting for a poll or an earlier command to finish; sent = the network call.
+        queued_ms, sent_ms = (start - since) * 1000, (done - start) * 1000
+        log.log(logging.INFO if queued_ms + sent_ms > SLOW_COMMAND_MS else logging.DEBUG,
+                "Command %s: queued %.0f ms, sent in %.0f ms", dps, queued_ms, sent_ms)
         if echo:
             self.stateReceived.emit(echo, False)
 
