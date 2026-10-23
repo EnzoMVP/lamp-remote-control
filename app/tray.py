@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Slot
@@ -9,6 +10,7 @@ from PySide6.QtGui import QAction, QColor, QGuiApplication, QIcon, QPainter, QPa
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from . import autostart
+from .config import app_dir
 
 
 def taskbar_is_light() -> bool:
@@ -75,12 +77,27 @@ def render_icon(on: bool, color: QColor, status: str, light_taskbar: bool, size:
 
 
 class TrayIcon(QSystemTrayIcon):
-    def __init__(self, bulb, flyout, parent=None):
+    def __init__(self, bulb, flyout, voice=None, parent=None):
         super().__init__(parent)
         self._bulb = bulb
         self._flyout = flyout
+        self._voice = voice
+        self._voice_status = voice.status if voice is not None else "off"
+        self._announce_ready = False
+        self._error_shown = ""  # a retry loop repeats its error: only notify the first time
 
         menu = QMenu()
+        if voice is not None:
+            self._voice_action = QAction("Comandos de voz", menu, checkable=True)
+            self._voice_action.toggled.connect(voice.setEnabled)
+            menu.addAction(self._voice_action)
+            self._voice_test_action = QAction("Modo de teste (só registra no log)", menu, checkable=True)
+            self._voice_test_action.toggled.connect(voice.setTestMode)
+            menu.addAction(self._voice_test_action)
+            menu.addAction("Abrir log", self._open_log)
+            menu.addSeparator()
+            voice.statusChanged.connect(self._on_voice_changed)
+            self._sync_voice_actions()
         self._autostart = QAction("Iniciar com o Windows", menu, checkable=True)
         self._autostart.setChecked(autostart.is_enabled())
         self._autostart.toggled.connect(self._on_autostart_toggled)
@@ -111,7 +128,49 @@ class TrayIcon(QSystemTrayIcon):
             tip = f"{b.deviceName}: ligada · {b.brightness}%"
         else:
             tip = f"{b.deviceName}: desligada"
+        if self._voice is not None and self._voice.enabled:
+            tip += "\nVoz: " + {
+                "listening": "teste (só registra)" if self._voice.testMode else "ouvindo",
+                "downloading": "baixando o modelo…",
+                "loading": "carregando…",
+                "error": self._voice.message or "erro",
+            }.get(self._voice.status, "")
         self.setToolTip(tip)
+
+    def _sync_voice_actions(self):
+        for action, checked in ((self._voice_action, self._voice.enabled),
+                                (self._voice_test_action, self._voice.testMode)):
+            action.blockSignals(True)
+            action.setChecked(checked)
+            action.blockSignals(False)
+        self._voice_test_action.setEnabled(self._voice.enabled)
+
+    @Slot()
+    def _on_voice_changed(self):
+        status, previous = self._voice.status, self._voice_status
+        self._voice_status = status
+        self._sync_voice_actions()
+        self.refresh()
+        if status == previous:
+            return
+        if status == "error":
+            if self._voice.message != self._error_shown:
+                self._error_shown = self._voice.message
+                self.showMessage("LampRemote", self._voice.message, QSystemTrayIcon.MessageIcon.Warning)
+        elif status == "downloading":
+            if not self._announce_ready:  # the first download takes a while: say when it's done
+                self._announce_ready = True
+                self.showMessage("LampRemote", self._voice.message)
+        elif status in ("listening", "off"):
+            self._error_shown = ""
+        if status == "listening" and self._announce_ready:
+            self._announce_ready = False
+            self.showMessage("LampRemote", "Comandos de voz prontos")
+
+    def _open_log(self):
+        path = app_dir() / "lampremote.log"
+        if path.exists() and sys.platform == "win32":
+            os.startfile(path)
 
     def _on_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:

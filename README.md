@@ -4,12 +4,14 @@ Controle da lâmpada **Elgin 15W Smart Color** (Tuya, Wi‑Fi) pela bandeja do W
 (`tinytuya`), sem passar pela nuvem.
 
 - Clique esquerdo no ícone abre o painel; clique fora ou `Esc` fecha.
-- Clique direito: **Iniciar com o Windows** e **Sair**.
+- Clique direito: **Comandos de voz**, **Modo de teste**, **Abrir log**, **Iniciar com o Windows**
+  e **Sair**.
 - Painel: liga/desliga, brilho, luz branca (temperatura quente ↔ frio), cor (matiz + saturação),
   4 cenas (Leitura, Relaxar, Foco, Noite), com uma lâmpada 3D que acende na cor atual.
 - O ícone da bandeja mostra o estado: preenchido na cor da lâmpada (ligada), só contorno
   (desligada), apagado com ponto laranja (offline).
 - Segue o tema claro/escuro do Windows.
+- Comandos de voz sempre ouvindo, offline (seção 5).
 
 ## Estrutura
 
@@ -24,6 +26,8 @@ app/
   flyout.py           janela do painel: posicionamento sobre o ícone, foco, Esc
   tray.py             ícone dinâmico da bandeja + menu
   autostart.py        "Iniciar com o Windows" (registro HKCU\...\Run)
+  settings.py         preferências do menu (%APPDATA%\LampRemote\settings.json)
+  voice.py            comandos de voz: microfone → detector de fala → Vosk → ação
   lathe.py            geometria 3D da lâmpada (perfil revolucionado)
   import_devices.py   gera o config.json a partir do devices.json do wizard
   qml/                interface (Flyout, Bulb3D, sliders, tiles, tema)
@@ -120,7 +124,7 @@ achar a lâmpada pelo ID na rede e atualiza o config sozinho.
 .venv\Scripts\pyinstaller LampRemote.spec --noconfirm
 ```
 
-O resultado fica em `dist\LampRemote\` (pasta com ~155 MB; o `LampRemote.exe` fica dentro dela).
+O resultado fica em `dist\LampRemote\` (pasta com ~215 MB; o `LampRemote.exe` fica dentro dela).
 O build é em pasta, e não em arquivo único, porque abre bem mais rápido: o modo "onefile"
 descompactaria o Qt inteiro a cada inicialização.
 
@@ -136,6 +140,35 @@ descompactaria o Qt inteiro a cada inicialização.
 
 Para atualizar: clique direito → Sair, substitua a pasta e abra de novo. Se você moveu a pasta,
 marque "Iniciar com o Windows" outra vez.
+
+## 5. Comandos de voz
+
+Clique direito no ícone → **Comandos de voz**. Na primeira vez, o app baixa o modelo de voz em
+português (~32 MB, para `%APPDATA%\LampRemote\voice`) e avisa quando estiver pronto. Daí em
+diante, tudo roda offline: o áudio não sai do PC.
+
+| Diga | Ação |
+|---|---|
+| "lâmpada, acende" | liga |
+| "lâmpada, apaga" | desliga |
+| "lâmpada, foco" | cena Foco |
+| "lâmpada, relaxa" | cena Relaxar |
+
+Fale a frase **sozinha**, com uma pausa antes e depois. A frase dita no meio de uma conversa
+("a lâmpada apaga sozinha às vezes") é ignorada de propósito, para não disparar sem querer.
+
+**Modo de teste**: com ele marcado, o app reconhece mas não mexe na lâmpada. Ele só registra no
+log o que teria feito (`Voz (teste): ouviu "..." -> executaria "off"`) e o que ouviu e ignorou.
+Deixe um dia ligado com conversa e TV, abra o log (**Abrir log** no menu) e veja se houve
+disparo indevido antes de usar para valer.
+
+Custo: com o quarto em silêncio, a voz ligada gasta menos de 1% de um núcleo e ~110 MB de RAM.
+O reconhecimento só roda enquanto há som.
+
+Se aparecer **"Microfone indisponível"**, confira *Configurações → Privacidade e segurança →
+Microfone*: "Acesso ao microfone" e "Permitir que aplicativos da área de trabalho acessem o
+microfone" precisam estar ligados. O app usa o microfone padrão do Windows e tenta de novo a
+cada 5 s (por exemplo, quando um fone USB é reconectado).
 
 ## Solução de problemas
 
@@ -159,6 +192,11 @@ marque "Iniciar com o Windows" outra vez.
   (o último valor vence). Arrastar o slider de ponta a ponta gera poucos comandos, e o valor
   final sempre chega à lâmpada. Leituras da lâmpada não sobrescrevem um controle que você mexeu
   nos últimos 2 s, então o slider não "pula de volta".
+- **Voz**: Vosk com o modelo pequeno em português e uma gramática fechada (as 4 frases mais
+  "qualquer outra coisa"), o que deixa o reconhecimento das frases bem confiável. Na frente dele
+  há um detector de fala por volume, com piso de ruído adaptativo, que separa as falas pelos
+  silêncios. O Vosk só processa enquanto há som, e cada fala só vira comando se for exatamente
+  uma das frases, com confiança ≥ 0,8 em cada palavra.
 - **Erros**: falhas viram um estado discreto no painel (topo "Offline", rodapé com contagem e
   "Tentar agora"), com reconexão automática em backoff. Após 3 falhas, o app procura a lâmpada
   pelo ID na rede, caso o IP tenha mudado.

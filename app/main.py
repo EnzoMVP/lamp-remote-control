@@ -19,8 +19,10 @@ from .bulb_controller import BulbController
 from .bulb_worker import BulbWorker
 from .config import ConfigError, app_dir, load_config, save_config
 from .flyout import FlyoutController
+from .settings import load_settings
 from .tray import TrayIcon
 from .tray_promote import schedule_promote_once
+from .voice import VoiceController
 
 log = logging.getLogger("lampremote")
 INSTANCE_KEY = f"LampRemote-{getpass.getuser()}"
@@ -126,7 +128,8 @@ def main(argv=None):
     except RuntimeError as e:
         QMessageBox.critical(None, "LampRemote", str(e))
         return 1
-    tray = TrayIcon(bulb, flyout)
+    voice = VoiceController(bulb, load_settings())
+    tray = TrayIcon(bulb, flyout, voice)
     tray.show()
     if not args.screenshot:
         schedule_promote_once(tray)
@@ -137,7 +140,9 @@ def main(argv=None):
     server.newConnection.connect(lambda: (server.nextPendingConnection(), flyout.open(tray.geometry())))
 
     def shutdown():
+        log.info("LampRemote quitting")
         tray.hide()
+        voice.shutdown()
         flyout.unload()  # tear QML down while `bulb`/`flyout` still exist
         if thread is not None:
             QMetaObject.invokeMethod(worker, "stop", Qt.ConnectionType.BlockingQueuedConnection)
@@ -147,6 +152,8 @@ def main(argv=None):
 
     if thread is not None:
         thread.start()
+    if not args.screenshot:
+        voice.start()
 
     if args.open or args.screenshot:
         QTimer.singleShot(400, lambda: flyout.open(tray.geometry()))

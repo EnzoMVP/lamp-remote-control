@@ -2,15 +2,16 @@
 # Produces dist\LampRemote\LampRemote.exe (one-folder build: starts fast, unlike --onefile,
 # which would unpack ~100 MB of Qt to a temp folder on every launch).
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 block_cipher = None
 
 a = Analysis(
     ["LampRemote.pyw"],
     pathex=[],
-    binaries=[],
-    datas=[("app/qml", "app/qml")],
+    # vosk loads libvosk.dll and sounddevice the PortAudio DLL from their package folders.
+    binaries=collect_dynamic_libs("vosk"),
+    datas=[("app/qml", "app/qml"), *collect_data_files("_sounddevice_data")],
     hiddenimports=[
         "PySide6.QtQuick3D",
         "PySide6.QtQuickControls2",
